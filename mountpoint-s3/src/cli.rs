@@ -121,6 +121,15 @@ Learn more in Mountpoint's configuration documentation (CONFIGURATION.md).\
 
     #[clap(
         long,
+        help = "Use S3 Access Grants for authorization",
+        help_heading = AWS_CREDENTIALS_OPTIONS_HEADER
+    )]
+    pub use_access_grants: bool,
+
+
+
+    #[clap(
+        long,
         help = "Mount file system in read-only mode",
         help_heading = MOUNT_OPTIONS_HEADER
     )]
@@ -753,11 +762,49 @@ impl CliArgs {
     fn auth_config(&self) -> S3ClientAuthConfig {
         if self.no_sign_request {
             S3ClientAuthConfig::NoSigning
+        } else if self.use_access_grants {
+            let config = self.build_access_grants_config();
+            let profile_override = self.profile.clone();
+            S3ClientAuthConfig::AccessGrants { config, profile_override }
         } else if let Some(profile_name) = self.profile.clone() {
             S3ClientAuthConfig::Profile(profile_name)
         } else {
             S3ClientAuthConfig::Default
         }
+    }
+
+    fn build_access_grants_config(&self) -> mountpoint_s3_client::config::AccessGrantsConfig {
+        // Determine permission based on read_only flag
+        let permission = if self.read_only {
+            mountpoint_s3_client::config::AccessGrantsPermission::Read
+        } else {
+            mountpoint_s3_client::config::AccessGrantsPermission::ReadWrite
+        };
+
+        // Build target S3 URI from bucket and prefix
+        let target = match &self.bucket_name {
+            BucketNameOrS3Uri::BucketName(bucket_name) => {
+                let bucket_str: String = bucket_name.clone().into();
+                match &self.prefix {
+                    Some(prefix) => format!("s3://{}/{}", bucket_str, prefix.as_str().trim_start_matches('/')),
+                    None => format!("s3://{}", bucket_str),
+                }
+            },
+            BucketNameOrS3Uri::S3Uri(s3uri) => {
+                let bucket_str: String = s3uri.bucket_name.clone().into();
+                if s3uri.prefix.as_str().is_empty() {
+                    format!("s3://{}", bucket_str)
+                } else {
+                    format!("s3://{}/{}", bucket_str, s3uri.prefix.as_str())
+                }
+            }
+        };
+
+        // Account ID from expected_bucket_owner if provided
+        // If not provided, we'll detect it from the current credentials in the provider
+        let account_id = self.expected_bucket_owner.clone();
+
+        mountpoint_s3_client::config::AccessGrantsConfig::new(account_id, target, permission)
     }
 
     pub fn client_config(&self, version: &str) -> ClientConfig {
